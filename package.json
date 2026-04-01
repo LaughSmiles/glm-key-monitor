@@ -1,0 +1,56 @@
+{
+  "name": "glm-key-monitor",
+  "displayName": "GLM Key Monitor",
+  "description": "监控智谱 AI (BigModel) API Key 的使用量，在状态栏显示 Token 剩余百分比和重置时间",
+  "version": "0.1.0",
+  "publisher": "glm-tools",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "glmKeyMonitor.setKey",
+        "title": "GLM: Set API Key"
+      },
+      {
+        "command": "glmKeyMonitor.refresh",
+        "title": "GLM: Refresh Usage"
+      },
+      {
+        "command": "glmKeyMonitor.showUsageDetails",
+        "title": "GLM: Show Usage Details"
+      }
+    ],
+    "configuration": {
+      "title": "GLM Key Monitor",
+      "properties": {
+        "glmKeyMonitor.refreshInterval": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "description": "自动刷新间隔（分钟）"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.0"
+  }
+}

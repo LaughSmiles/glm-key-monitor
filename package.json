@@ -1,10 +1,27 @@
 {
-  "name": "glm-key-monitor",
-  "displayName": "GLM Key Monitor",
+  "name": "glm-monitor",
+  "displayName": "GLM Monitor",
   "description": "监控智谱 AI (BigModel) API Key 的使用量，在状态栏显示 Token 剩余百分比和重置时间",
   "version": "0.0.2",
-  "publisher": "glm-tools",
-  "repository": { "type": "git", "url": "https://github.com/example/glm-key-monitor" },
+  "publisher": "LaughSmiles",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LaughSmiles/glm-key-monitor"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/LaughSmiles/glm-key-monitor#readme",
+  "bugs": {
+    "url": "https://github.com/LaughSmiles/glm-key-monitor/issues"
+  },
+  "keywords": [
+    "GLM",
+    "智谱AI",
+    "BigModel",
+    "API Monitor",
+    "Token Usage",
+    "Speed Test"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -41,8 +58,15 @@
         },
         "glmKeyMonitor.speedTestModels": {
           "type": "array",
-          "items": { "type": "string" },
-          "default": ["glm-4.7", "glm-5", "glm-5-turbo", "glm-5.1"],
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "glm-4.7",
+            "glm-5",
+            "glm-5-turbo",
+            "glm-5.1"
+          ],
           "description": "测速模型列表（可在 Webview 中手动添加更多）"
         }
       }
@@ -58,6 +82,7 @@
     "@types/node": "^20.10.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^2.22.0",
+    "sharp": "^0.34.5",
     "typescript": "^5.3.0"
   }
 }

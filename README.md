@@ -29,7 +29,7 @@ cd glm-key-monitor
 npm install
 npm run compile
 npm run package
-code --install-extension glm-key-monitor-0.1.0.vsix
+code --install-extension glm-key-monitor-0.0.2.vsix
 ```
 
 或直接下载 [latest release](https://github.com/LaughSmiles/glm-key-monitor/releases) 的 `.vsix` 文件，在编辑器中 `Ctrl+Shift+P` → `Extensions: Install from VSIX...`。

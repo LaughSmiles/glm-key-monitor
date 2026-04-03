@@ -6,3 +6,5 @@ node_modules/**
 tsconfig.json
 package-lock.json
 **/*.map
+.cursor-history.md
+glm_speed_test.py

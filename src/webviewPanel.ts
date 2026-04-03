@@ -2,11 +2,37 @@ import * as vscode from 'vscode';
 import { getQuotaLimit, getModelUsage, getToolUsage, TokenLimit } from './apiClient';
 import { formatProgressBar, formatRemainingTime, formatNumber, getStatusColor } from './dataParser';
 import { getKey, setKey, deleteKey as deleteStoredKey } from './keyStorage';
+import { runSpeedTest, DEFAULT_MODELS, SpeedTestResult, CONCURRENCY_OPTIONS } from './speedTest';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 let panelContext: vscode.ExtensionContext | undefined;
 let currentApiKey: string | undefined;
 let panelDisposables: vscode.Disposable[] = [];
+let speedTestAbort: AbortController | undefined;
+let lastSpeedResults: SpeedTestResult[] = [];
+let isSpeedTesting = false;
+let speedTestProgress = { current: 0, total: 0, model: '', promptName: '' };
+
+interface ModelConfig { name: string; selected: boolean; }
+const SPEED_MODELS_KEY = 'glm-speed-test-models';
+let speedTestModels: ModelConfig[] = [];
+
+async function loadSpeedTestModels(context: vscode.ExtensionContext): Promise<ModelConfig[]> {
+    const saved = context.globalState.get<ModelConfig[]>(SPEED_MODELS_KEY);
+    if (saved && saved.length > 0) {
+        speedTestModels = saved;
+    } else {
+        speedTestModels = DEFAULT_MODELS.map(name => ({ name, selected: true }));
+        await context.globalState.update(SPEED_MODELS_KEY, speedTestModels);
+    }
+    return speedTestModels;
+}
+
+async function saveSpeedTestModels() {
+    if (panelContext) {
+        await panelContext.globalState.update(SPEED_MODELS_KEY, speedTestModels);
+    }
+}
 
 const INTERVAL_OPTIONS = [1, 3, 5, 10, 15, 30, 60];
 const TIME_RANGE_OPTIONS = [24, 168, 720];
@@ -16,6 +42,7 @@ let currentTimeRange = 24;
 export async function showUsageDetails(context: vscode.ExtensionContext, apiKey?: string): Promise<void> {
     panelContext = context;
     if (apiKey) { currentApiKey = apiKey; }
+    await loadSpeedTestModels(context);
 
     if (currentPanel) {
         currentPanel.reveal(vscode.ViewColumn.Two);
@@ -95,6 +122,64 @@ export async function showUsageDetails(context: vscode.ExtensionContext, apiKey?
                 if (key) {
                     await loadUsageData(key, hours);
                 }
+            } else if (msg.command === 'startSpeedTest') {
+                const models: string[] = msg.models || DEFAULT_MODELS;
+                const concurrency: number = msg.concurrency || 1;
+                const key = currentApiKey || await getKey(panelContext);
+                if (!key) { return; }
+                isSpeedTesting = true;
+                speedTestAbort = new AbortController();
+                const startTime = Date.now();
+                const ctx = panelContext;
+                await runSpeedTest(key, models, (progress) => {
+                    if (progress.type === 'progress') {
+                        speedTestProgress = { current: progress.current, total: progress.total, model: progress.model, promptName: progress.promptName };
+                        if (currentPanel) {
+                            currentPanel.webview.postMessage({ command: 'speedProgress', current: progress.current, total: progress.total, model: progress.model, promptName: progress.promptName });
+                        }
+                    } else if (progress.type === 'result') {
+                        if (currentPanel) {
+                            currentPanel.webview.postMessage({ command: 'speedResult', result: progress.result, elapsed: ((Date.now() - startTime) / 1000).toFixed(1) });
+                        }
+                    } else if (progress.type === 'done') {
+                        isSpeedTesting = false;
+                        lastSpeedResults = progress.allResults || [];
+                        if (currentPanel) {
+                            currentPanel.webview.postMessage({ command: 'speedDone', results: progress.allResults, elapsed: ((Date.now() - startTime) / 1000).toFixed(1) });
+                        } else {
+                            vscode.window.showInformationMessage('🚀 模型测速已完成，点击查看结果', '查看').then(selection => {
+                                if (selection === '查看' && ctx) {
+                                    showUsageDetails(ctx, key);
+                                }
+                            });
+                        }
+                    } else if (progress.type === 'error') {
+                        isSpeedTesting = false;
+                        if (currentPanel) {
+                            currentPanel.webview.postMessage({ command: 'speedError', error: progress.errorMsg });
+                        } else {
+                            vscode.window.showErrorMessage('🚀 模型测速失败: ' + (progress.errorMsg || 'Unknown'));
+                        }
+                    }
+                }, speedTestAbort.signal, concurrency);
+            } else if (msg.command === 'stopSpeedTest') {
+                speedTestAbort?.abort();
+                isSpeedTesting = false;
+            } else if (msg.command === 'addSpeedModel') {
+                const name = (msg.name as string).trim();
+                if (name && !speedTestModels.some(m => m.name === name)) {
+                    speedTestModels.push({ name, selected: true });
+                    await saveSpeedTestModels();
+                }
+            } else if (msg.command === 'removeSpeedModel') {
+                const name = msg.name as string;
+                speedTestModels = speedTestModels.filter(m => m.name !== name);
+                await saveSpeedTestModels();
+            } else if (msg.command === 'toggleSpeedModel') {
+                const name = msg.name as string;
+                const m = speedTestModels.find(m => m.name === name);
+                if (m) { m.selected = !m.selected; }
+                await saveSpeedTestModels();
             }
         }));
 
@@ -141,6 +226,12 @@ function getBarColorClass(pct: number): string {
     return color === 'red' ? 'bar-red' : color === 'yellow' ? 'bar-yellow' : 'bar-green';
 }
 
+function maskKey(key?: string): string {
+    if (!key) { return '未设置'; }
+    if (key.length <= 10) { return key.slice(0, 3) + '****'; }
+    return key.slice(0, 6) + '****' + key.slice(-4);
+}
+
 function wrapHtml(bodyContent: string, currentInterval: number = 10, timeRange: number = 24): string {
     return `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>${getCommonStyles()}</style></head><body>
@@ -161,7 +252,8 @@ function getCommonStyles(): string {
   .btn-secondary:hover { background:var(--vscode-button-secondaryHoverBackground); }
   .interval-group { display:flex; align-items:center; gap:4px; font-size:13px; color:var(--vscode-descriptionForeground); }
   .interval-group select { background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border); border-radius:3px; padding:3px 8px; font-size:13px; }
-  .key-display { font-size:13px; color:var(--vscode-descriptionForeground); font-family:var(--vscode-editor-font-family); margin-left:auto; }
+  .key-display { font-size:13px; color:var(--vscode-descriptionForeground); font-family:var(--vscode-editor-font-family); margin-left:auto; cursor:pointer; user-select:none; }
+  .key-display:hover { color:var(--vscode-editor-foreground); }
   .section { border:1px solid var(--vscode-panel-border); border-radius:6px; padding:16px; margin:12px 0; }
   .bar-container { background:var(--vscode-input-background); border-radius:4px; padding:2px; margin:4px 0; }
   .bar-fill { height:18px; border-radius:3px; transition:width 0.3s; }
@@ -175,6 +267,21 @@ function getCommonStyles(): string {
   .error { color:#F44747; }
   .spinner { display:inline-block; width:16px; height:16px; border:2px solid var(--vscode-descriptionForeground); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle; margin-right:8px; }
   @keyframes spin { to { transform:rotate(360deg); } }
+  .speed-section { border:1px solid var(--vscode-panel-border); border-radius:6px; padding:16px; margin:12px 0; }
+  .speed-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+  .speed-models { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:8px 0; }
+  .model-tag { display:inline-flex; align-items:center; gap:4px; background:var(--vscode-input-background); border:1px solid var(--vscode-input-border); border-radius:3px; padding:3px 10px; font-size:12px; cursor:pointer; user-select:none; }
+  .model-tag.selected { background:var(--vscode-button-background); color:var(--vscode-button-foreground); border-color:var(--vscode-button-background); }
+  .model-tag .remove { cursor:pointer; margin-left:4px; opacity:0.7; font-weight:bold; }
+  .model-tag .remove:hover { opacity:1; }
+  .add-model-row { display:flex; gap:6px; align-items:center; margin:8px 0; }
+  .add-model-row input { background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border); border-radius:3px; padding:4px 8px; font-size:12px; width:180px; }
+  .speed-progress { color:var(--vscode-descriptionForeground); margin:8px 0; font-size:13px; }
+  .speed-bar-outer { background:var(--vscode-input-background); border-radius:4px; height:8px; margin:6px 0; overflow:hidden; }
+  .speed-bar-inner { height:100%; background:var(--vscode-button-background); border-radius:4px; transition:width 0.3s; }
+  .speed-results { margin-top:12px; }
+  .speed-summary td, .speed-summary th { font-size:13px; }
+  .fastest { color:#4EC9B0; font-weight:bold; }
 `;
 }
 
@@ -187,13 +294,16 @@ function getToolbarHtml(currentInterval: number, currentTimeRange: number = 24):
         `<option value="${h}" ${h === currentTimeRange ? 'selected' : ''}>${TIME_RANGE_LABELS[h]}</option>`
     ).join('');
 
-    const keyDisplay = currentApiKey || '未设置';
+    const maskedKey = maskKey(currentApiKey);
+    const fullKey = currentApiKey || '未设置';
 
     return `<div class="toolbar">
   <button class="btn" onclick="refresh()">🔄 刷新</button>
   <button class="btn btn-secondary" onclick="setKey()">🔑 设置 Key</button>
   <button class="btn btn-secondary" onclick="deleteKey()">🗑️ 删除 Key</button>
-  <span class="key-display">Key: ${keyDisplay}</span>
+  <span class="key-display" onclick="toggleKey()" title="点击切换显示/隐藏 Key">Key: <span id="keyText">${maskedKey}</span><span id="keyIcon"> 👁</span></span>
+  <input type="hidden" id="fullKey" value="${fullKey}">
+  <input type="hidden" id="maskedKey" value="${maskedKey}">
   <div class="interval-group">
     <span>📅 查询范围:</span>
     <select onchange="changeTimeRange(this.value)">${timeRangeOptions}</select>
@@ -213,6 +323,113 @@ function setKey() { vscode.postMessage({ command: 'setKey' }); }
 function deleteKey() { vscode.postMessage({ command: 'deleteKey' }); }
 function changeInterval(val) { vscode.postMessage({ command: 'setInterval', value: parseInt(val) }); }
 function changeTimeRange(val) { vscode.postMessage({ command: 'setTimeRange', value: parseInt(val) }); }
+let keyVisible = false;
+function toggleKey() {
+  keyVisible = !keyVisible;
+  document.getElementById('keyText').textContent = keyVisible ? document.getElementById('fullKey').value : document.getElementById('maskedKey').value;
+  document.getElementById('keyIcon').textContent = keyVisible ? ' 🙈' : ' 👁';
+}
+
+// Speed test
+function getSelectedModels() {
+  return Array.from(document.querySelectorAll('.model-tag.selected')).map(el => el.dataset.model);
+}
+function toggleModel(el) {
+  el.classList.toggle('selected');
+  vscode.postMessage({ command: 'toggleSpeedModel', name: el.dataset.model });
+}
+function removeModel(name) {
+  const el = document.querySelector('.model-tag[data-model="' + name + '"]');
+  if (el) el.remove();
+  vscode.postMessage({ command: 'removeSpeedModel', name: name });
+}
+function addModel() {
+  const input = document.getElementById('newModelInput');
+  const name = input.value.trim();
+  if (!name) return;
+  if (document.querySelector('.model-tag[data-model="' + name + '"]')) { input.value = ''; return; }
+  const tags = document.getElementById('modelTags');
+  const span = document.createElement('span');
+  span.className = 'model-tag selected';
+  span.dataset.model = name;
+  span.innerHTML = name + ' <span class="remove" onclick="event.stopPropagation();removeModel(\\'' + name + '\\')">×</span>';
+  span.onclick = function() { toggleModel(span); };
+  tags.appendChild(span);
+  input.value = '';
+  vscode.postMessage({ command: 'addSpeedModel', name: name });
+}
+function startSpeedTest() {
+  const btn = document.getElementById('speedTestBtn');
+  if (btn.textContent.includes('停止')) {
+    vscode.postMessage({ command: 'stopSpeedTest' });
+    btn.textContent = '▶ 开始测速';
+    document.getElementById('speedProgress').style.display = 'none';
+    return;
+  }
+  const models = getSelectedModels();
+  if (models.length === 0) { return; }
+  const concurrency = parseInt(document.getElementById('concurrencySelect').value) || 1;
+  vscode.postMessage({ command: 'startSpeedTest', models, concurrency });
+  document.getElementById('speedProgress').style.display = 'block';
+  document.getElementById('speedBar').style.width = '0%';
+  document.getElementById('speedStatus').textContent = '准备中...';
+  document.getElementById('speedResults').innerHTML = '';
+  btn.textContent = '⏹ 停止';
+}
+window.addEventListener('message', event => {
+  const msg = event.data;
+  if (msg.command === 'speedProgress') {
+    const pct = Math.round(msg.current / msg.total * 100);
+    document.getElementById('speedBar').style.width = pct + '%';
+    document.getElementById('speedStatus').textContent = '⏳ ' + msg.model + ' / ' + msg.promptName + ' (' + msg.current + '/' + msg.total + ')';
+  } else if (msg.command === 'speedResult') {
+    // Individual result received, can show live
+  } else if (msg.command === 'speedDone') {
+    document.getElementById('speedProgress').style.display = 'none';
+    document.getElementById('speedTestBtn').textContent = '▶ 开始测速';
+    document.getElementById('speedResults').innerHTML = buildResultsHtml(msg.results);
+  } else if (msg.command === 'speedError') {
+    document.getElementById('speedProgress').style.display = 'none';
+    document.getElementById('speedTestBtn').textContent = '▶ 开始测速';
+    document.getElementById('speedResults').innerHTML = '<p class="error">测速失败: ' + (msg.error || 'Unknown') + '</p>';
+  }
+});
+function buildResultsHtml(results) {
+  if (!results || results.length === 0) return '<p>无结果</p>';
+  let html = '<p style="color:var(--vscode-descriptionForeground);font-size:13px;">✅ 测试完成</p>';
+  html += '<table class="speed-summary"><tr><th>模型</th><th>场景</th><th>首Token</th><th>总耗时</th><th>生成速度</th><th>字符数</th></tr>';
+  for (const r of results) {
+    if (r.error) {
+      html += '<tr><td>' + r.model + '</td><td>' + r.promptName + '</td><td colspan="4" class="error">ERROR: ' + r.error.slice(0, 60) + '</td></tr>';
+    } else {
+      html += '<tr><td>' + r.model + '</td><td>' + r.promptName + '</td><td>' + r.ttft + 's</td><td>' + r.totalTime + 's</td><td>' + r.tps + ' c/s</td><td>' + r.charCount + '</td></tr>';
+    }
+  }
+  html += '</table>';
+  // Summary
+  var stats = {};
+  for (var r of results) {
+    if (r.error) continue;
+    if (!stats[r.model]) stats[r.model] = {ttft:0,total:0,tps:0,n:0};
+    stats[r.model].ttft += r.ttft;
+    stats[r.model].total += r.totalTime;
+    stats[r.model].tps += r.tps;
+    stats[r.model].n++;
+  }
+  var sorted = Object.entries(stats).sort(function(a,b){ return (a[1].total/a[1].n) - (b[1].total/b[1].n); });
+  if (sorted.length > 0) {
+    html += '<h3>汇总对比</h3>';
+    html += '<table class="speed-summary"><tr><th>模型</th><th>平均首Token</th><th>平均总耗时</th><th>平均生成速度</th></tr>';
+    for (var i = 0; i < sorted.length; i++) {
+      var m = sorted[i][0], s = sorted[i][1];
+      var cls = i === 0 ? ' class="fastest"' : '';
+      var icon = i === 0 ? '🏆 ' : '   ';
+      html += '<tr' + cls + '><td>' + icon + m + '</td><td>' + (s.ttft/s.n).toFixed(3) + 's</td><td>' + (s.total/s.n).toFixed(3) + 's</td><td>' + (s.tps/s.n).toFixed(1) + ' c/s</td></tr>';
+    }
+    html += '</table>';
+  }
+  return html;
+}
 </script>`;
 }
 
@@ -315,7 +532,98 @@ function generateReportHtml(
         html += `<div class="section"><p class="error">工具使用量查询失败: ${tool.msg || 'Unknown'}</p></div>`;
     }
 
+    // Speed test section
+    html += generateSpeedTestHtml();
+
     return wrapHtml(html, currentInterval, timeRange);
+}
+
+function generateSpeedTestHtml(): string {
+    const models = speedTestModels.length > 0 ? speedTestModels : DEFAULT_MODELS.map(name => ({ name, selected: true }));
+    const cachedResults = lastSpeedResults;
+    const testing = isSpeedTesting;
+    let html = `<div class="speed-section">`;
+    html += `<div class="speed-header"><h2 style="margin:0">🚀 模型测速</h2>`;
+    html += `<button class="btn" id="speedTestBtn" onclick="startSpeedTest()">${testing ? '⏹ 停止' : '▶ 开始测速'}</button></div>`;
+
+    // Model selection
+    html += `<p style="color:var(--vscode-descriptionForeground); font-size:13px; margin-bottom:4px;">选择模型:</p>`;
+    html += `<div class="speed-models" id="modelTags">`;
+    for (const m of models) {
+        const cls = m.selected ? 'model-tag selected' : 'model-tag';
+        html += `<span class="${cls}" data-model="${m.name}" onclick="toggleModel(this)">${m.name} <span class="remove" onclick="event.stopPropagation();removeModel('${m.name}')">×</span></span>`;
+    }
+    html += `</div>`;
+    html += `<div class="add-model-row">`;
+    html += `<input type="text" id="newModelInput" placeholder="输入模型名称" onkeydown="if(event.key==='Enter')addModel()">`;
+    html += `<button class="btn btn-secondary" onclick="addModel()" style="font-size:12px; padding:4px 10px;">+ 添加</button>`;
+    html += `</div>`;
+
+    // Test prompts info
+    html += `<p style="color:var(--vscode-descriptionForeground); font-size:12px; margin:4px 0;">测试场景: 代码生成、逻辑推理、长文本生成</p>`;
+
+    // Concurrency selector
+    const concurrencyOptions = CONCURRENCY_OPTIONS.map(n => `<option value="${n}">${n} 线程</option>`).join('');
+    html += `<div class="interval-group" style="margin:6px 0;"><span>🔀 并发线程:</span><select id="concurrencySelect">${concurrencyOptions}</select></div>`;
+
+    // Progress area
+    const sp = speedTestProgress;
+    const pct = sp.total > 0 ? Math.round(sp.current / sp.total * 100) : 0;
+    const statusText = testing ? `⏳ ${sp.model} / ${sp.promptName} (${sp.current}/${sp.total})` : '';
+    html += `<div id="speedProgress" style="display:${testing ? 'block' : 'none'}">`;
+    html += `<div class="speed-bar-outer"><div class="speed-bar-inner" id="speedBar" style="width:${pct}%"></div></div>`;
+    html += `<p class="speed-progress" id="speedStatus">${statusText}</p>`;
+    html += `</div>`;
+
+    // Results area
+    html += `<div class="speed-results" id="speedResults">`;
+    if (cachedResults.length > 0 && !testing) {
+        html += buildSpeedResultsHtml(cachedResults);
+    }
+    html += `</div>`;
+
+    html += `</div>`;
+    return html;
+}
+
+function buildSpeedResultsHtml(results: SpeedTestResult[]): string {
+    let html = `<p style="color:var(--vscode-descriptionForeground); font-size:13px;">✅ 测试完成</p>`;
+
+    // Detail table
+    html += `<table class="speed-summary"><tr><th>模型</th><th>场景</th><th>首Token</th><th>总耗时</th><th>生成速度</th><th>字符数</th></tr>`;
+    for (const r of results) {
+        if (r.error) {
+            html += `<tr><td>${r.model}</td><td>${r.promptName}</td><td colspan="4" class="error">ERROR: ${r.error.slice(0, 60)}</td></tr>`;
+        } else {
+            html += `<tr><td>${r.model}</td><td>${r.promptName}</td><td>${r.ttft}s</td><td>${r.totalTime}s</td><td>${r.tps} c/s</td><td>${r.charCount}</td></tr>`;
+        }
+    }
+    html += `</table>`;
+
+    // Summary
+    const modelStats: Record<string, { ttftSum: number; totalSum: number; tpsSum: number; count: number }> = {};
+    for (const r of results) {
+        if (r.error) { continue; }
+        if (!modelStats[r.model]) { modelStats[r.model] = { ttftSum: 0, totalSum: 0, tpsSum: 0, count: 0 }; }
+        modelStats[r.model].ttftSum += r.ttft;
+        modelStats[r.model].totalSum += r.totalTime;
+        modelStats[r.model].tpsSum += r.tps;
+        modelStats[r.model].count++;
+    }
+
+    const sorted = Object.entries(modelStats).sort((a, b) => (a[1].totalSum / a[1].count) - (b[1].totalSum / b[1].count));
+    if (sorted.length > 0) {
+        html += `<h3>汇总对比</h3>`;
+        html += `<table class="speed-summary"><tr><th>模型</th><th>平均首Token</th><th>平均总耗时</th><th>平均生成速度</th></tr>`;
+        sorted.forEach(([model, s], i) => {
+            const cls = i === 0 ? ' class="fastest"' : '';
+            const icon = i === 0 ? '🏆 ' : '   ';
+            html += `<tr${cls}><td>${icon}${model}</td><td>${(s.ttftSum / s.count).toFixed(3)}s</td><td>${(s.totalSum / s.count).toFixed(3)}s</td><td>${(s.tpsSum / s.count).toFixed(1)} c/s</td></tr>`;
+        });
+        html += `</table>`;
+    }
+
+    return html;
 }
 
 function formatDateTime(date: Date): string {

@@ -4,6 +4,7 @@
   "description": "监控智谱 AI (BigModel) API Key 的使用量，在状态栏显示 Token 剩余百分比和重置时间",
   "version": "0.1.0",
   "publisher": "glm-tools",
+  "repository": { "type": "git", "url": "https://github.com/example/glm-key-monitor" },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -37,6 +38,12 @@
           "default": 10,
           "minimum": 1,
           "description": "自动刷新间隔（分钟）"
+        },
+        "glmKeyMonitor.speedTestModels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["glm-4.7", "glm-5", "glm-5-turbo", "glm-5.1"],
+          "description": "测速模型列表（可在 Webview 中手动添加更多）"
         }
       }
     }

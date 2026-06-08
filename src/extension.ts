@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { getKey, setKey } from './keyStorage';
-import { getQuotaLimit } from './apiClient';
-import { parseQuotaStatus, QuotaStatus, formatRemainingTime } from './dataParser';
+import { getQuotaLimit, getModelUsageRaw } from './apiClient';
+import { parseQuotaStatus, QuotaStatus, formatWindowTime, extractModelName } from './dataParser';
 import { createStatusBarItem, updateStatusBar } from './statusBar';
 import { showUsageDetails } from './webviewPanel';
 
@@ -86,6 +86,11 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(configDisposable);
 }
 
+function formatDateTime(date: Date): string {
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 async function refreshQuota(context: vscode.ExtensionContext, item: vscode.StatusBarItem) {
     if (isLoading) {
         return;
@@ -103,13 +108,24 @@ async function refreshQuota(context: vscode.ExtensionContext, item: vscode.Statu
     updateStatusBar(item, { type: 'loading' });
 
     try {
-        const result = await getQuotaLimit(apiKey);
+        // Fetch quota and model usage in parallel
+        // model-usage API requires time range parameters
+        const now = new Date();
+        const endTime = formatDateTime(now);
+        const startTime = formatDateTime(new Date(now.getTime() - 24 * 60 * 60 * 1000));
+        const [result, modelUsageRaw] = await Promise.all([
+            getQuotaLimit(apiKey),
+            getModelUsageRaw(apiKey, startTime, endTime).catch(() => undefined)
+        ]);
+
         // 如果在请求期间 Key 被删除，丢弃旧结果
         if (thisGeneration !== refreshGeneration) {
             return;
         }
         if (result.code === 200 && result.data) {
-            const quotaStatus = parseQuotaStatus(result.data);
+            // Auto-detect model name from model-usage API response
+            const detectedModel = extractModelName(modelUsageRaw);
+            const quotaStatus = parseQuotaStatus(result.data, detectedModel);
             if (quotaStatus) {
                 lastQuotaStatus = quotaStatus;
                 updateStatusBar(item, { type: 'quota', status: quotaStatus });
@@ -146,11 +162,11 @@ function startRefreshTimer(context: vscode.ExtensionContext, item: vscode.Status
 function startCountdownTimer(item: vscode.StatusBarItem) {
     countdownTimer = setInterval(() => {
         if (lastQuotaStatus && !isLoading) {
-            const { percentage, progressBar, color, nextResetTime } = lastQuotaStatus;
-            const remainingTime = formatRemainingTime(nextResetTime);
+            const { percentage, progressBar, color, nextResetTime, modelName } = lastQuotaStatus;
+            const remainingTime = formatWindowTime(nextResetTime);
             updateStatusBar(item, {
                 type: 'quota',
-                status: { percentage, remainingTime, progressBar, color, nextResetTime }
+                status: { percentage, remainingTime, progressBar, color, nextResetTime, modelName }
             });
         }
     }, 60_000);

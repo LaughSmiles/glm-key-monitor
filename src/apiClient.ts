@@ -94,6 +94,14 @@ export async function getModelUsage(apiKey: string, startTime?: string, endTime?
     return JSON.parse(raw) as ModelUsageResponse;
 }
 
+export async function getModelUsageRaw(apiKey: string, startTime?: string, endTime?: string): Promise<any> {
+    const params: Record<string, string> = {};
+    if (startTime) { params.startTime = startTime; }
+    if (endTime) { params.endTime = endTime; }
+    const raw = await httpRequest('/api/monitor/usage/model-usage', apiKey, params);
+    return JSON.parse(raw);
+}
+
 export async function getToolUsage(apiKey: string, startTime?: string, endTime?: string): Promise<ToolUsageResponse> {
     const params: Record<string, string> = {};
     if (startTime) { params.startTime = startTime; }

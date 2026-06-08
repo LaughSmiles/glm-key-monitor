@@ -39,7 +39,7 @@ export function updateStatusBar(item: vscode.StatusBarItem, state: DisplayState)
     switch (state.type) {
         case 'quota': {
             const { status } = state;
-            item.text = `GLM: ${status.progressBar} ${status.percentage}% | ${status.remainingTime}`;
+            item.text = `[${status.modelName}] | Usage ${status.progressBar} ${status.percentage}% ${status.remainingTime}`;
             item.color = COLOR_MAP[status.color];
             break;
         }
